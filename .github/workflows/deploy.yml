@@ -1,0 +1,40 @@
+name: Deploy Odoo 17
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Deploy to VPS
+      uses: appleboy/ssh-action@master
+      with:
+        host: ${{ secrets.VPS_HOST }}
+        username: ${{ secrets.VPS_USER }}
+        key: ${{ secrets.VPS_SSH_KEY }}
+        script: |
+          cd /opt/odoo17
+          
+          # Backup database
+          docker exec odoo17_db pg_dump -U odoo postgres > backup/backup_$(date +%Y%m%d_%H%M%S).sql
+          
+          # Pull latest code
+          git pull origin main
+          
+          # Restart containers
+          docker-compose down
+          docker-compose up -d
+          
+          # Update Odoo addons
+          docker exec odoo17_app odoo -u all -d postgres --stop-after-init
+          docker-compose restart odoo
+          
+          echo "Deployment completed!"
+

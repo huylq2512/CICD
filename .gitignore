@@ -1,0 +1,15 @@
+# Odoo data
+data/
+postgresql/
+backup/
+
+# Logs
+*.log
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Environment
+.env
