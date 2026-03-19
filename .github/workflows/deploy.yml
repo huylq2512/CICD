@@ -13,6 +13,21 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v3
 
+    - name: Send deployment start notification
+      uses: appleboy/telegram-action@master
+      with:
+        to: ${{ secrets.TELEGRAM_CHAT_ID }}
+        token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        message: |
+          🚀 Odoo 17 Deployment Started
+          
+          📦 Repository: ${{ github.repository }}
+          👤 Author: ${{ github.actor }}
+          📝 Commit: ${{ github.event.head_commit.message }}
+          🌿 Branch: ${{ github.ref_name }}
+          
+          ⏳ Deploying...
+
     - name: Deploy to VPS
       uses: appleboy/ssh-action@master
       with:
@@ -22,19 +37,135 @@ jobs:
         script: |
           cd /opt/odoo17
           
-          # Backup database
-          docker exec odoo17_db pg_dump -U odoo postgres > backup/backup_$(date +%Y%m%d_%H%M%S).sql
+          # 1. BACKUP DATABASE
+          echo "📦 Creating database backup..."
+          BACKUP_FILE="backup/backup_$(date +%Y%m%d_%H%M%S).sql"
+          docker exec odoo17_db pg_dump -U odoo postgres > $BACKUP_FILE
           
-          # Pull latest code
+          if [ $? -eq 0 ]; then
+              BACKUP_SIZE=$(du -h $BACKUP_FILE | cut -f1)
+              echo "✅ Backup successful: $BACKUP_SIZE"
+          else
+              echo "❌ Backup failed! Aborting deployment."
+              exit 1
+          fi
+          
+          # 2. PULL CODE
+          echo "🔄 Pulling latest code..."
           git pull origin main
           
-          # Restart containers
+          # 3. RESTART CONTAINERS
+          echo "🔄 Restarting containers..."
           docker-compose down
           docker-compose up -d
           
-          # Update Odoo addons
-          docker exec odoo17_app odoo -u all -d postgres --stop-after-init
+          # 4. WAIT
+          echo "⏳ Waiting for Odoo to start..."
+          sleep 15
+          
+          # 5. CHECK DATABASE CONNECTION
+          echo "🔍 Checking database connection..."
+          docker exec odoo17_db psql -U odoo -d postgres -c "SELECT 1;" > /dev/null 2>&1
+          
+          if [ $? -eq 0 ]; then
+              echo "✅ Database connection OK"
+          else
+              echo "❌ Database connection failed!"
+              exit 1
+          fi
+          
+          # 6. CHECK DATA INTEGRITY
+          echo "🔍 Checking data integrity..."
+          USER_COUNT=$(docker exec odoo17_db psql -U odoo -d postgres -t -c "SELECT COUNT(*) FROM res_users;" | xargs)
+          echo "👥 Total users: $USER_COUNT"
+          
+          if [ "$USER_COUNT" -lt 1 ]; then
+              echo "❌ Data integrity check failed!"
+              exit 1
+          fi
+          
+          # 7. UPDATE MODULES
+          echo "🔄 Updating Odoo modules..."
+          docker exec odoo17_app odoo -u all -d postgres --stop-after-init || true
           docker-compose restart odoo
           
-          echo "Deployment completed!"
+          # 8. HEALTH CHECK
+          echo "🏥 Health check..."
+          sleep 10
+          HEALTH_CHECK=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:80)
+          
+          if [ "$HEALTH_CHECK" == "200" ] || [ "$HEALTH_CHECK" == "303" ]; then
+              echo "✅ Health check passed (HTTP $HEALTH_CHECK)"
+          else
+              echo "❌ Health check failed (HTTP $HEALTH_CHECK)"
+              exit 1
+          fi
+          
+          # 9. GET DATABASE SIZE
+          DB_SIZE=$(docker exec odoo17_db psql -U odoo -d postgres -t -c "SELECT pg_size_pretty(pg_database_size('postgres'));" | xargs)
+          echo "💾 Database size: $DB_SIZE"
+          
+          # 10. CLEANUP OLD BACKUPS
+          echo "🧹 Cleaning old backups..."
+          cd backup
+          ls -t backup_*.sql 2>/dev/null | tail -n +8 | xargs -r rm
+          BACKUP_COUNT=$(ls -1 backup_*.sql 2>/dev/null | wc -l)
+          echo "✅ Kept $BACKUP_COUNT recent backups"
+          
+          # Export variables for notification
+          echo "BACKUP_SIZE=$BACKUP_SIZE" >> $GITHUB_ENV
+          echo "USER_COUNT=$USER_COUNT" >> $GITHUB_ENV
+          echo "DB_SIZE=$DB_SIZE" >> $GITHUB_ENV
+          echo "BACKUP_COUNT=$BACKUP_COUNT" >> $GITHUB_ENV
+          
+          echo ""
+          echo "========================================="
+          echo "✅ DEPLOYMENT COMPLETED SUCCESSFULLY!"
+          echo "========================================="
 
+    - name: Send success notification
+      if: success()
+      uses: appleboy/telegram-action@master
+      with:
+        to: ${{ secrets.TELEGRAM_CHAT_ID }}
+        token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        message: |
+          ✅ Odoo 17 Deployment SUCCESS
+          
+          📦 Repository: ${{ github.repository }}
+          👤 Author: ${{ github.actor }}
+          📝 Commit: ${{ github.event.head_commit.message }}
+          🌿 Branch: ${{ github.ref_name }}
+          
+          📊 Deployment Info:
+          💾 Database Size: ${{ env.DB_SIZE }}
+          👥 Total Users: ${{ env.USER_COUNT }}
+          📦 Backup Size: ${{ env.BACKUP_SIZE }}
+          🗃️ Backups Kept: ${{ env.BACKUP_COUNT }}
+          
+          🌐 Server: http://180.93.35.201
+          
+          ⏱️ Time: $(date '+%Y-%m-%d %H:%M:%S')
+
+    - name: Send failure notification
+      if: failure()
+      uses: appleboy/telegram-action@master
+      with:
+        to: ${{ secrets.TELEGRAM_CHAT_ID }}
+        token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        message: |
+          ❌ Odoo 17 Deployment FAILED
+          
+          📦 Repository: ${{ github.repository }}
+          👤 Author: ${{ github.actor }}
+          📝 Commit: ${{ github.event.head_commit.message }}
+          🌿 Branch: ${{ github.ref_name }}
+          
+          ⚠️ Action Required:
+          Check logs: https://github.com/${{ github.repository }}/actions
+          
+          💡 Quick Rollback:
+          git revert HEAD
+          git push origin main
+          
+          ⏱️ Time: $(date '+%Y-%m-%d %H:%M:%S')
