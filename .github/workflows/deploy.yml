@@ -29,6 +29,7 @@ jobs:
           ⏳ Deploying...
 
     - name: Deploy to VPS
+      id: deploy
       uses: appleboy/ssh-action@master
       with:
         host: ${{ secrets.VPS_HOST }}
@@ -45,6 +46,7 @@ jobs:
           if [ $? -eq 0 ]; then
               BACKUP_SIZE=$(du -h $BACKUP_FILE | cut -f1)
               echo "✅ Backup successful: $BACKUP_SIZE"
+              echo "BACKUP_SIZE=$BACKUP_SIZE" >> deploy_info.txt
           else
               echo "❌ Backup failed! Aborting deployment."
               exit 1
@@ -78,6 +80,7 @@ jobs:
           echo "🔍 Checking data integrity..."
           USER_COUNT=$(docker exec odoo17_db psql -U odoo -d postgres -t -c "SELECT COUNT(*) FROM res_users;" | xargs)
           echo "👥 Total users: $USER_COUNT"
+          echo "USER_COUNT=$USER_COUNT" >> deploy_info.txt
           
           if [ "$USER_COUNT" -lt 1 ]; then
               echo "❌ Data integrity check failed!"
@@ -104,6 +107,7 @@ jobs:
           # 9. GET DATABASE SIZE
           DB_SIZE=$(docker exec odoo17_db psql -U odoo -d postgres -t -c "SELECT pg_size_pretty(pg_database_size('postgres'));" | xargs)
           echo "💾 Database size: $DB_SIZE"
+          echo "DB_SIZE=$DB_SIZE" >> deploy_info.txt
           
           # 10. CLEANUP OLD BACKUPS
           echo "🧹 Cleaning old backups..."
@@ -111,17 +115,40 @@ jobs:
           ls -t backup_*.sql 2>/dev/null | tail -n +8 | xargs -r rm
           BACKUP_COUNT=$(ls -1 backup_*.sql 2>/dev/null | wc -l)
           echo "✅ Kept $BACKUP_COUNT recent backups"
-          
-          # Export variables for notification
-          echo "BACKUP_SIZE=$BACKUP_SIZE" >> $GITHUB_ENV
-          echo "USER_COUNT=$USER_COUNT" >> $GITHUB_ENV
-          echo "DB_SIZE=$DB_SIZE" >> $GITHUB_ENV
-          echo "BACKUP_COUNT=$BACKUP_COUNT" >> $GITHUB_ENV
+          cd ..
+          echo "BACKUP_COUNT=$BACKUP_COUNT" >> deploy_info.txt
           
           echo ""
           echo "========================================="
           echo "✅ DEPLOYMENT COMPLETED SUCCESSFULLY!"
           echo "========================================="
+
+    - name: Get deployment info
+      id: info
+      uses: appleboy/ssh-action@master
+      with:
+        host: ${{ secrets.VPS_HOST }}
+        username: ${{ secrets.VPS_USER }}
+        key: ${{ secrets.VPS_SSH_KEY }}
+        script: |
+          cd /opt/odoo17
+          cat deploy_info.txt
+
+    - name: Parse deployment info
+      id: parse
+      run: |
+        INFO="${{ steps.info.outputs.stdout }}"
+        echo "Raw info: $INFO"
+        
+        BACKUP_SIZE=$(echo "$INFO" | grep "BACKUP_SIZE=" | cut -d'=' -f2)
+        USER_COUNT=$(echo "$INFO" | grep "USER_COUNT=" | cut -d'=' -f2)
+        DB_SIZE=$(echo "$INFO" | grep "DB_SIZE=" | cut -d'=' -f2)
+        BACKUP_COUNT=$(echo "$INFO" | grep "BACKUP_COUNT=" | cut -d'=' -f2)
+        
+        echo "backup_size=$BACKUP_SIZE" >> $GITHUB_OUTPUT
+        echo "user_count=$USER_COUNT" >> $GITHUB_OUTPUT
+        echo "db_size=$DB_SIZE" >> $GITHUB_OUTPUT
+        echo "backup_count=$BACKUP_COUNT" >> $GITHUB_OUTPUT
 
     - name: Send success notification
       if: success()
@@ -138,14 +165,14 @@ jobs:
           🌿 Branch: ${{ github.ref_name }}
           
           📊 Deployment Info:
-          💾 Database Size: ${{ env.DB_SIZE }}
-          👥 Total Users: ${{ env.USER_COUNT }}
-          📦 Backup Size: ${{ env.BACKUP_SIZE }}
-          🗃️ Backups Kept: ${{ env.BACKUP_COUNT }}
+          💾 Database Size: ${{ steps.parse.outputs.db_size }}
+          👥 Total Users: ${{ steps.parse.outputs.user_count }}
+          📦 Backup Size: ${{ steps.parse.outputs.backup_size }}
+          🗃️ Backups Kept: ${{ steps.parse.outputs.backup_count }}
           
           🌐 Server: http://180.93.35.201
           
-          ⏱️ Time: $(date '+%Y-%m-%d %H:%M:%S')
+          ⏱️ Deployed at: ${{ github.event.head_commit.timestamp }}
 
     - name: Send failure notification
       if: failure()
@@ -167,5 +194,14 @@ jobs:
           💡 Quick Rollback:
           git revert HEAD
           git push origin main
-          
-          ⏱️ Time: $(date '+%Y-%m-%d %H:%M:%S')
+
+    - name: Cleanup temp files
+      if: always()
+      uses: appleboy/ssh-action@master
+      with:
+        host: ${{ secrets.VPS_HOST }}
+        username: ${{ secrets.VPS_USER }}
+        key: ${{ secrets.VPS_SSH_KEY }}
+        script: |
+          cd /opt/odoo17
+          rm -f deploy_info.txt
